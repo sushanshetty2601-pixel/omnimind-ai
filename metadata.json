@@ -1,0 +1,6 @@
+{
+  "name": "OmniMind AI",
+  "description": "A generative learning mirror that transforms notes, whiteboard photos, and lecture audio into conceptual gap quizzes with bespoke, real-time explanatory infographics and analogical comic/diagram toggles.",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
