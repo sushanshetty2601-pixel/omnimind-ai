@@ -17,6 +17,14 @@ export interface QuizSession {
   questions: Question[];
   userAnswers: { [questionId: string]: number }; // questionId -> selectedOptionIndex
   completed: boolean;
+  quizSummary?: string;
+  videoSummary?: string;
+  videoNativeQuizzes?: {
+    question: string;
+    answer: string;
+    explanation: string;
+  }[];
+  youtubeUrl?: string; // If it's a YouTube-based study session
 }
 
 export interface IntakeRequest {

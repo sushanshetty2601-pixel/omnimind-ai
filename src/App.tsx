@@ -27,9 +27,12 @@ import {
   Check, 
   HelpCircle,
   Eye,
-  BookMarked
+  BookMarked,
+  Youtube,
+  ExternalLink
 } from "lucide-react";
 import { Question, QuizSession } from "./types";
+import { fetchCloudSessions, saveCloudSession, deleteCloudSession } from "./firebase";
 
 export default function App() {
   // Application Modes: 'dashboard' | 'loading' | 'quiz' | 'review'
@@ -44,9 +47,11 @@ export default function App() {
   const [selectedOption, setSelectedOption] = useState<number | null>(null);
   const [isAnswerValidated, setIsAnswerValidated] = useState<boolean>(false);
   const [eli5Mode, setEli5Mode] = useState<boolean>(false);
+  const [reviewTab, setReviewTab] = useState<"gap" | "video" | "native">("gap");
   
   // Form / Intake Inputs
   const [notesText, setNotesText] = useState<string>("");
+  const [youtubeUrl, setYoutubeUrl] = useState<string>("");
   const [uploadedFile, setUploadedFile] = useState<{
     data: string; // Base64
     mimeType: string;
@@ -59,22 +64,26 @@ export default function App() {
   const getResourceAnalysis = () => {
     const textLength = notesText.trim().length;
     const hasFile = !!uploadedFile;
+    const hasYoutube = !!youtubeUrl.trim();
     const totalWords = notesText.trim() ? notesText.trim().split(/\s+/).filter(Boolean).length : 0;
     
-    if (textLength === 0 && !hasFile) return { wordCount: 0, depth: "None", recommendedCount: 0 };
+    if (textLength === 0 && !hasFile && !hasYoutube) return { wordCount: 0, depth: "None", recommendedCount: 0 };
     
-    let depth: "Micro-snippet" | "Standard Study" | "Comprehensive Outline" | "Deep Repository" = "Micro-snippet";
-    let recommendedCount = 3;
+    let depth: "Micro-snippet" | "Standard Study" | "Comprehensive Outline" | "Deep Repository" | "YouTube Lecture Scan" = "Micro-snippet";
+    let recommendedCount = 10; // Enforce minimum of 10 questions
     
-    if (totalWords > 300 || (hasFile && totalWords > 100)) {
+    if (hasYoutube) {
+      depth = "YouTube Lecture Scan";
+      recommendedCount = 15;
+    } else if (totalWords > 300 || (hasFile && totalWords > 100)) {
       depth = "Deep Repository";
-      recommendedCount = 10;
+      recommendedCount = 20;
     } else if (totalWords > 120 || hasFile) {
       depth = "Comprehensive Outline";
-      recommendedCount = 8;
+      recommendedCount = 15;
     } else if (totalWords > 30) {
       depth = "Standard Study";
-      recommendedCount = 5;
+      recommendedCount = 10;
     }
     
     return { wordCount: totalWords, depth, recommendedCount };
@@ -108,8 +117,9 @@ export default function App() {
   // Errors
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
-  // Fetch saved sessions on mount
+  // Fetch saved sessions on mount (local + cloud sync)
   useEffect(() => {
+    // 1. Load from localStorage first for immediate rendering
     try {
       const saved = localStorage.getItem("omnimind_sessions");
       if (saved) {
@@ -118,12 +128,57 @@ export default function App() {
     } catch (e) {
       console.error("Failed to load saved sessions from localStorage", e);
     }
+
+    // 2. Fetch from Firestore to sync cloud sessions
+    const syncCloud = async () => {
+      try {
+        const cloudData = await fetchCloudSessions();
+        if (cloudData && cloudData.length > 0) {
+          setSessions((prev) => {
+            const merged = [...prev];
+            cloudData.forEach((cloudSession) => {
+              const localIndex = merged.findIndex((s) => s.id === cloudSession.id);
+              if (localIndex > -1) {
+                merged[localIndex] = { ...merged[localIndex], ...cloudSession };
+              } else {
+                merged.push(cloudSession as QuizSession);
+              }
+            });
+            // Sort by creation date
+            merged.sort((a, b) => {
+              const timeA = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+              const timeB = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+              return timeB - timeA;
+            });
+            localStorage.setItem("omnimind_sessions", JSON.stringify(merged));
+            return merged;
+          });
+        }
+      } catch (err) {
+        console.error("Cloud sync failed:", err);
+      }
+    };
+    syncCloud();
   }, []);
 
-  // Save sessions to localStorage helper
+  // Save sessions helper (both local and cloud)
   const saveSessions = (updated: QuizSession[]) => {
     setSessions(updated);
     localStorage.setItem("omnimind_sessions", JSON.stringify(updated));
+  };
+
+  // Helper to save or update a single session in state, local, and Firestore
+  const updateSingleSession = (session: QuizSession) => {
+    setSessions((prev) => {
+      const next = prev.map(s => s.id === session.id ? session : s);
+      if (!next.some(s => s.id === session.id)) {
+        next.unshift(session);
+      }
+      localStorage.setItem("omnimind_sessions", JSON.stringify(next));
+      return next;
+    });
+    // Cloud sync in background
+    saveCloudSession(session).catch(e => console.error("Cloud save failure:", e));
   };
 
   // Status index looping during loading
@@ -348,8 +403,8 @@ export default function App() {
 
   // Handle submit to server
   const generateQuiz = async () => {
-    if (!notesText.trim() && !uploadedFile) {
-      setErrorMessage("Please input study notes or scan/record an educational asset first.");
+    if (!notesText.trim() && !uploadedFile && !youtubeUrl.trim()) {
+      setErrorMessage("Please input study notes, scan/record an educational asset, or paste a YouTube video link first.");
       return;
     }
 
@@ -368,6 +423,7 @@ export default function App() {
         body: JSON.stringify({
           text: notesText || undefined,
           file: uploadedFile || undefined,
+          youtubeUrl: youtubeUrl || undefined,
           questionCount: finalCount
         })
       });
@@ -388,12 +444,15 @@ export default function App() {
           id: `q_${i}`
         })),
         userAnswers: {},
-        completed: false
+        completed: false,
+        quizSummary: data.quizSummary,
+        videoSummary: data.videoSummary,
+        videoNativeQuizzes: data.videoNativeQuizzes,
+        youtubeUrl: youtubeUrl || undefined
       };
 
       // Add to sessions and save
-      const updatedSessions = [newSession, ...sessions];
-      saveSessions(updatedSessions);
+      updateSingleSession(newSession);
       
       // Load this active session immediately
       setActiveSession(newSession);
@@ -408,6 +467,7 @@ export default function App() {
       setUploadedFile(null);
       setFilePreview(null);
       setAudioUrl(null);
+      setYoutubeUrl("");
 
     } catch (err: any) {
       console.error(err);
@@ -439,6 +499,9 @@ export default function App() {
 
     setActiveSession(updatedSession);
     setIsAnswerValidated(true);
+    
+    // Auto-update this progress to cloud and state
+    updateSingleSession(updatedSession);
 
     // If answer is incorrect, pre-set ELI5 mode to false to display the technical map first
     if (!isCorrect) {
@@ -463,8 +526,7 @@ export default function App() {
         completed: true
       };
       
-      const updated = sessions.map(s => s.id === activeSession.id ? completedSession : s);
-      saveSessions(updated);
+      updateSingleSession(completedSession);
       setActiveSession(completedSession);
       setMode("review");
     }
@@ -505,6 +567,7 @@ export default function App() {
     e.stopPropagation();
     const updated = sessions.filter(s => s.id !== sessionId);
     saveSessions(updated);
+    deleteCloudSession(sessionId).catch(err => console.error("Cloud delete failure:", err));
     if (activeSession?.id === sessionId) {
       setActiveSession(null);
       setMode("dashboard");
@@ -611,10 +674,41 @@ export default function App() {
                   )}
 
                   <div className="space-y-6">
+                    {/* YouTube Video URL Section */}
+                    <div>
+                      <label className="block text-xs font-mono text-slate-400 uppercase tracking-wider mb-2 flex items-center gap-1.5 text-red-400">
+                        <Youtube className="w-4 h-4" /> Option A: YouTube Video Link (OmniMind Deep Analysis)
+                      </label>
+                      <div className="relative">
+                        <input
+                          type="text"
+                          value={youtubeUrl}
+                          onChange={(e) => setYoutubeUrl(e.target.value)}
+                          placeholder="Paste a YouTube watch link (e.g., https://www.youtube.com/watch?v=dQw4w9WgXcQ)..."
+                          className="w-full bg-black/40 border border-white/10 focus:border-red-500/40 rounded-xl py-3 pl-4 pr-12 text-sm text-slate-200 placeholder:text-slate-600 focus:outline-none focus:ring-1 focus:ring-red-500/30 transition-all font-sans"
+                        />
+                        <div className="absolute inset-y-0 right-0 flex items-center pr-4 pointer-events-none text-red-500/50">
+                          <Youtube className="w-5 h-5" />
+                        </div>
+                      </div>
+                      <p className="text-[10px] text-slate-500 mt-1.5 leading-relaxed">
+                        OmniMind will retrieve automated transcripts, map key chapters and topics, extract native quizzes, and design a customized diagnostic assessment.
+                      </p>
+                    </div>
+
+                    {/* Divider visual */}
+                    <div className="relative flex py-1 items-center">
+                      <div className="flex-grow border-t border-white/10" />
+                      <span className="flex-shrink mx-4 text-[10px] font-mono uppercase tracking-widest text-indigo-400 bg-slate-950 px-3 py-1 rounded border border-white/10">
+                        And / Or
+                      </span>
+                      <div className="flex-grow border-t border-white/10" />
+                    </div>
+
                     {/* Text Notes Section */}
                     <div>
                       <label className="block text-xs font-mono text-slate-400 uppercase tracking-wider mb-2">
-                        Option A: Paste Study Notes, Transcripts, or Slides
+                        Option B: Paste Study Notes, Transcripts, or Slides
                       </label>
                       <textarea
                         value={notesText}
@@ -634,6 +728,9 @@ export default function App() {
                     </div>
 
                     {/* File Attachment & Mic Audio Recording Split Area */}
+                    <div className="block text-xs font-mono text-slate-400 uppercase tracking-wider mb-2">
+                      Option C: Upload Educational Assets / Explain Verbally
+                    </div>
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                       
                       {/* Drag & Drop Upload Zone */}
@@ -751,7 +848,7 @@ export default function App() {
                     )}
 
                     {/* Resource Analysis & Quiz Depth Configuration */}
-                    {(notesText.trim() || uploadedFile) && (
+                    {(notesText.trim() || uploadedFile || youtubeUrl.trim()) && (
                       <div className="bg-white/5 border border-white/10 rounded-xl p-4 space-y-4">
                         <div className="flex items-center justify-between border-b border-white/10 pb-2">
                           <span className="text-xs font-mono text-slate-400 uppercase tracking-wider">
@@ -777,39 +874,91 @@ export default function App() {
                           </div>
                         </div>
 
-                        <div className="pt-2 border-t border-white/5">
-                          <label className="block text-xs font-mono text-slate-400 uppercase tracking-wider mb-2">
+                        <div className="pt-2 border-t border-white/5 space-y-3">
+                          <label className="block text-xs font-mono text-slate-400 uppercase tracking-wider">
                             Select Quiz Depth (Core Questions)
                           </label>
-                          <div className="grid grid-cols-5 gap-1.5 p-1 bg-black/40 rounded-lg border border-white/10">
-                            {[
-                              { label: "Auto", value: "auto" },
-                              { label: "3 Qs", value: 3 },
-                              { label: "5 Qs", value: 5 },
-                              { label: "8 Qs", value: 8 },
-                              { label: "10 Qs", value: 10 }
-                            ].map((opt) => {
-                              const isActive = quizLength === opt.value;
-                              return (
-                                <button
-                                  key={opt.label}
-                                  type="button"
-                                  onClick={() => setQuizLength(opt.value as any)}
-                                  className={`py-1.5 px-1 rounded text-xs font-medium transition-all ${
-                                    isActive
-                                      ? "bg-indigo-600 text-white shadow-md"
-                                      : "text-slate-400 hover:text-slate-200 hover:bg-white/5"
-                                  }`}
-                                >
-                                  {opt.label}
-                                </button>
-                              );
-                            })}
+                          
+                          <div className="flex bg-black/40 p-1 rounded-xl border border-white/10 gap-1">
+                            <button
+                              type="button"
+                              onClick={() => setQuizLength("auto")}
+                              className={`flex-1 py-1.5 rounded-lg text-xs font-medium font-mono transition-all ${
+                                quizLength === "auto"
+                                  ? "bg-indigo-600 text-white shadow-md font-bold"
+                                  : "text-slate-400 hover:text-slate-200 hover:bg-white/5"
+                              }`}
+                            >
+                              Auto-detect
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                if (quizLength === "auto") {
+                                  setQuizLength(15);
+                                }
+                              }}
+                              className={`flex-1 py-1.5 rounded-lg text-xs font-medium font-mono transition-all ${
+                                quizLength !== "auto"
+                                  ? "bg-indigo-600 text-white shadow-md font-bold"
+                                  : "text-slate-400 hover:text-slate-200 hover:bg-white/5"
+                              }`}
+                            >
+                              Manual Count
+                            </button>
                           </div>
-                          <p className="text-[10px] text-slate-500 mt-1.5">
+
+                          {quizLength !== "auto" && (
+                            <div className="space-y-3 p-3 bg-black/30 rounded-xl border border-white/5 animate-fadeIn">
+                              <div className="flex items-center justify-between gap-4">
+                                <input
+                                  type="range"
+                                  min={10}
+                                  max={200}
+                                  step={1}
+                                  value={typeof quizLength === "number" ? quizLength : 15}
+                                  onChange={(e) => setQuizLength(Number(e.target.value))}
+                                  className="w-full h-1.5 bg-white/10 rounded-lg appearance-none cursor-pointer accent-indigo-500"
+                                />
+                                <div className="flex items-center gap-1.5 shrink-0">
+                                  <input
+                                    type="number"
+                                    min={10}
+                                    max={200}
+                                    value={typeof quizLength === "number" ? quizLength : 15}
+                                    onChange={(e) => {
+                                      const val = Math.max(10, Math.min(200, Number(e.target.value) || 10));
+                                      setQuizLength(val);
+                                    }}
+                                    className="w-16 px-2 py-1 text-xs font-mono font-bold text-center text-white bg-slate-900 border border-white/15 rounded-lg focus:outline-none focus:border-indigo-500"
+                                  />
+                                  <span className="text-[10px] font-mono text-slate-500 uppercase">Qs</span>
+                                </div>
+                              </div>
+
+                              <div className="flex flex-wrap gap-1.5 justify-between">
+                                {[10, 25, 50, 100, 200].map((preset) => (
+                                  <button
+                                    key={preset}
+                                    type="button"
+                                    onClick={() => setQuizLength(preset)}
+                                    className={`py-1 px-2.5 rounded text-[10px] font-mono transition-all border ${
+                                      quizLength === preset
+                                        ? "bg-indigo-500/10 border-indigo-500 text-indigo-300 font-bold"
+                                        : "bg-white/5 border-transparent text-slate-400 hover:text-slate-200"
+                                    }`}
+                                  >
+                                    {preset} Qs
+                                  </button>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+
+                          <p className="text-[10px] text-slate-500 leading-relaxed">
                             {quizLength === "auto" 
-                              ? `Auto-detect: Generating ${getResourceAnalysis().recommendedCount} questions to match study material density.`
-                              : `Manual: Selected exactly ${quizLength} questions to evaluate concept relationships.`
+                              ? `Auto-detect: Generating ${getResourceAnalysis().recommendedCount} questions to match study material density (minimum of 10).`
+                              : `Manual: Generating exactly ${quizLength} customized dependency questions (10 - 200 questions range).`
                             }
                           </p>
                         </div>
@@ -820,7 +969,7 @@ export default function App() {
                     <button
                       type="button"
                       onClick={generateQuiz}
-                      disabled={!notesText.trim() && !uploadedFile}
+                      disabled={!notesText.trim() && !uploadedFile && !youtubeUrl.trim()}
                       className="w-full py-4 rounded-xl font-display font-bold text-white bg-gradient-to-r from-indigo-500 to-blue-600 hover:brightness-110 shadow-[0_0_25px_rgba(79,70,229,0.3)] disabled:opacity-40 disabled:cursor-not-allowed transition-all flex items-center justify-center gap-2 text-md tracking-tight active:scale-[0.99]"
                     >
                       <Sparkles className="w-5 h-5 text-indigo-200" />
@@ -1302,7 +1451,7 @@ export default function App() {
                                 className="space-y-2"
                               >
                                 <h5 className="text-xs font-mono text-indigo-400 uppercase tracking-wider flex items-center gap-1 font-bold">
-                                  <Cpu className="w-3.5 h-3.5" /> SYSTEM COGNITIVE ALIGNMENT
+                                  <Cpu className="w-3.5 h-3.5" /> OmniMind AI Justification
                                 </h5>
                                 <p className="text-xs text-slate-300 leading-relaxed">
                                   {activeSession.questions[currentQuestionIndex].remediationText}
@@ -1397,107 +1546,258 @@ export default function App() {
                 })()}
               </div>
 
-              {/* Detailed Breakdown of Concepts Tested */}
-              <div className="space-y-4">
-                <h3 className="font-display font-bold text-md text-white flex items-center gap-2">
-                  <Brain className="w-5 h-5 text-indigo-400" />
-                  Conceptual Gap Analysis
-                </h3>
+              {/* Navigation Tabs row for Diagnostics, Material Breakdown, and Embedded Video Quizzes */}
+              <div className="flex border-b border-white/10 gap-2 overflow-x-auto pb-1">
+                <button
+                  type="button"
+                  onClick={() => setReviewTab("gap")}
+                  className={`py-3 px-4 text-xs font-mono font-bold uppercase tracking-wider border-b-2 transition-all flex items-center gap-2 shrink-0 ${
+                    reviewTab === "gap"
+                      ? "border-indigo-500 text-white bg-white/5 rounded-t-xl"
+                      : "border-transparent text-slate-400 hover:text-slate-200"
+                  }`}
+                >
+                  <Brain className="w-4 h-4 text-indigo-400" /> Quiz & Diagnostic Gaps
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setReviewTab("video")}
+                  className={`py-3 px-4 text-xs font-mono font-bold uppercase tracking-wider border-b-2 transition-all flex items-center gap-2 shrink-0 ${
+                    reviewTab === "video"
+                      ? "border-indigo-500 text-white bg-white/5 rounded-t-xl"
+                      : "border-transparent text-slate-400 hover:text-slate-200"
+                  }`}
+                >
+                  <BookOpen className="w-4 h-4 text-indigo-400" /> Whole Material Breakdown
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setReviewTab("native")}
+                  className={`py-3 px-4 text-xs font-mono font-bold uppercase tracking-wider border-b-2 transition-all flex items-center gap-2 shrink-0 ${
+                    reviewTab === "native"
+                      ? "border-indigo-500 text-white bg-white/5 rounded-t-xl"
+                      : "border-transparent text-slate-400 hover:text-slate-200"
+                  }`}
+                >
+                  <HelpCircle className="w-4 h-4 text-indigo-400" /> Embedded Video Quizzes
+                </button>
+              </div>
 
-                <div className="space-y-4">
-                  {activeSession.questions.map((question, idx) => {
-                    const userAnswerIdx = activeSession.userAnswers[question.id];
-                    const isCorrect = userAnswerIdx === question.correctOptionIndex;
+              {/* TAB 1: Quiz & Diagnostic Gaps */}
+              {reviewTab === "gap" && (
+                <div className="space-y-6">
+                  {activeSession.quizSummary && (
+                    <div className="bg-gradient-to-r from-indigo-500/10 to-purple-500/10 border border-indigo-500/20 rounded-2xl p-6 space-y-3">
+                      <h4 className="text-sm font-semibold text-indigo-300 font-mono flex items-center gap-2">
+                        <Sparkles className="w-4 h-4 text-indigo-400" /> QUIZ GAP DIAGNOSTICS & STUDY ADVICE
+                      </h4>
+                      <p className="text-xs text-slate-300 leading-relaxed whitespace-pre-wrap font-sans">{activeSession.quizSummary}</p>
+                    </div>
+                  )}
 
-                    return (
-                      <details 
-                        key={question.id} 
-                        className="bg-white/5 border border-white/10 rounded-xl overflow-hidden group transition-all"
-                      >
-                        <summary className="p-4 flex items-center justify-between cursor-pointer select-none">
-                          <div className="flex items-center gap-3 overflow-hidden pr-2">
-                            <span className={`w-5 h-5 rounded-full shrink-0 flex items-center justify-center border ${
-                              isCorrect 
-                                ? "bg-emerald-500/10 border-emerald-500/20 text-emerald-400" 
-                                : "bg-red-500/10 border-red-500/20 text-red-400"
-                            }`}>
-                              {isCorrect ? <Check className="w-3 h-3" /> : <span className="text-[10px] font-mono font-bold">!</span>}
-                            </span>
-                            <div className="overflow-hidden">
-                              <p className="text-xs text-slate-500 font-mono uppercase tracking-wider font-bold">Concept {idx + 1}</p>
-                              <h4 className="text-sm font-semibold text-slate-200 truncate mt-0.5">{question.conceptTested}</h4>
-                            </div>
-                          </div>
-                          
-                          <span className="text-xs text-indigo-400 group-open:rotate-180 transition-transform font-mono">
-                            [Inspect]
-                          </span>
-                        </summary>
+                  <div className="space-y-4">
+                    <h3 className="font-display font-bold text-md text-white flex items-center gap-2">
+                      <Brain className="w-5 h-5 text-indigo-400" />
+                      Conceptual Gap Analysis
+                    </h3>
 
-                        <div className="px-4 pb-5 border-t border-white/10 bg-black/40 space-y-4 pt-4">
-                          <div className="space-y-2">
-                            <p className="text-xs font-semibold text-slate-400 uppercase font-mono">Scenario Question:</p>
-                            <p className="text-sm text-white leading-relaxed">{question.question}</p>
-                          </div>
+                    <div className="space-y-4">
+                      {activeSession.questions.map((question, idx) => {
+                        const userAnswerIdx = activeSession.userAnswers[question.id];
+                        const isCorrect = userAnswerIdx === question.correctOptionIndex;
 
-                          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                            {/* Choice feedback */}
-                            <div className="space-y-2">
-                              <p className="text-xs font-semibold text-slate-400 uppercase font-mono">Your Selection:</p>
-                              <div className={`p-3 rounded-lg border text-xs ${
-                                isCorrect 
-                                  ? "bg-emerald-500/10 border-emerald-500/20 text-emerald-200" 
-                                  : "bg-red-500/10 border-red-500/20 text-red-200"
-                              }`}>
-                                {question.options[userAnswerIdx]}
+                        return (
+                          <details 
+                            key={question.id} 
+                            className="bg-white/5 border border-white/10 rounded-xl overflow-hidden group transition-all"
+                          >
+                            <summary className="p-4 flex items-center justify-between cursor-pointer select-none">
+                              <div className="flex items-center gap-3 overflow-hidden pr-2">
+                                <span className={`w-5 h-5 rounded-full shrink-0 flex items-center justify-center border ${
+                                  isCorrect 
+                                    ? "bg-emerald-500/10 border-emerald-500/20 text-emerald-400" 
+                                    : "bg-red-500/10 border-red-500/20 text-red-400"
+                                }`}>
+                                  {isCorrect ? <Check className="w-3 h-3" /> : <span className="text-[10px] font-mono font-bold">!</span>}
+                                </span>
+                                <div className="overflow-hidden">
+                                  <p className="text-xs text-slate-500 font-mono uppercase tracking-wider font-bold">Concept {idx + 1}</p>
+                                  <h4 className="text-sm font-semibold text-slate-200 truncate mt-0.5">{question.conceptTested}</h4>
+                                </div>
                               </div>
-
-                              {!isCorrect && (
-                                <>
-                                  <p className="text-xs font-semibold text-slate-400 uppercase font-mono pt-1">Correct Logic Answer:</p>
-                                  <div className="p-3 rounded-lg border bg-emerald-500/10 border-emerald-500/20 text-emerald-200 text-xs">
-                                    {question.options[question.correctOptionIndex]}
-                                  </div>
-                                </>
-                              )}
-                            </div>
-
-                            {/* Remediation content */}
-                            <div className="space-y-2 bg-white/5 p-4 rounded-xl border border-white/10">
-                              <p className="text-xs font-semibold text-indigo-400 uppercase font-mono font-bold">Diagnostic Summary:</p>
-                              <p className="text-xs text-slate-300 leading-relaxed">{question.remediationText}</p>
                               
-                              <p className="text-xs font-semibold text-amber-400 uppercase font-mono pt-2 font-bold">Metaphorical Explanation (ELI5):</p>
-                              <p className="text-xs text-slate-400 leading-relaxed italic">"{question.eli5Explanation}"</p>
+                              <span className="text-xs text-indigo-400 group-open:rotate-180 transition-transform font-mono">
+                                [Inspect]
+                              </span>
+                            </summary>
+
+                            <div className="px-4 pb-5 border-t border-white/10 bg-black/40 space-y-4 pt-4">
+                              <div className="space-y-2">
+                                <p className="text-xs font-semibold text-slate-400 uppercase font-mono">Scenario Question:</p>
+                                <p className="text-sm text-white leading-relaxed">{question.question}</p>
+                              </div>
+
+                              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                {/* Choice feedback */}
+                                <div className="space-y-2">
+                                  <p className="text-xs font-semibold text-slate-400 uppercase font-mono">Your Selection:</p>
+                                  <div className={`p-3 rounded-lg border text-xs ${
+                                    isCorrect 
+                                      ? "bg-emerald-500/10 border-emerald-500/20 text-emerald-200" 
+                                      : "bg-red-500/10 border-red-500/20 text-red-200"
+                                  }`}>
+                                    {question.options[userAnswerIdx] !== undefined ? question.options[userAnswerIdx] : "Unanswered"}
+                                  </div>
+
+                                  {!isCorrect && (
+                                    <>
+                                      <p className="text-xs font-semibold text-slate-400 uppercase font-mono pt-1">Correct Logic Answer:</p>
+                                      <div className="p-3 rounded-lg border bg-emerald-500/10 border-emerald-500/20 text-emerald-200 text-xs">
+                                        {question.options[question.correctOptionIndex]}
+                                      </div>
+                                    </>
+                                  )}
+                                </div>
+
+                                {/* Remediation content */}
+                                <div className="space-y-2 bg-white/5 p-4 rounded-xl border border-white/10">
+                                  <p className="text-xs font-semibold text-indigo-400 uppercase font-mono font-bold">OmniMind AI Justification:</p>
+                                  <p className="text-xs text-slate-300 leading-relaxed">{question.remediationText}</p>
+                                  
+                                  <p className="text-xs font-semibold text-amber-400 uppercase font-mono pt-2 font-bold">Metaphorical Explanation (ELI5):</p>
+                                  <p className="text-xs text-slate-400 leading-relaxed italic">"{question.eli5Explanation}"</p>
+                                </div>
+                              </div>
+
+                              {/* Quick diagram display */}
+                              <div className="space-y-2">
+                                <p className="text-xs font-semibold text-slate-400 uppercase font-mono">Custom Visual Remediation:</p>
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                  <div className="bg-slate-900 border border-white/10 rounded-xl p-3 flex flex-col">
+                                    <span className="text-[9px] font-mono text-indigo-400 uppercase tracking-wider mb-2 font-bold">Technical Concept Map</span>
+                                    <div 
+                                      className="w-full aspect-[600/350] bg-black/60 rounded-lg p-1 overflow-hidden"
+                                      dangerouslySetInnerHTML={{ __html: question.remediationSvg }}
+                                    />
+                                  </div>
+                                  <div className="bg-slate-900 border border-white/10 rounded-xl p-3 flex flex-col">
+                                    <span className="text-[9px] font-mono text-amber-500 uppercase tracking-wider mb-2 font-bold">Illustrated Metaphor SVG</span>
+                                    <div 
+                                      className="w-full aspect-[600/350] bg-black/60 rounded-lg p-1 overflow-hidden"
+                                      dangerouslySetInnerHTML={{ __html: question.eli5Svg }}
+                                    />
+                                  </div>
+                                </div>
+                              </div>
+                            </div>
+                          </details>
+                        );
+                      })}
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* TAB 2: Whole Material Breakdown */}
+              {reviewTab === "video" && (
+                <div className="space-y-6 bg-white/5 border border-white/10 rounded-2xl p-6 sm:p-8 relative overflow-hidden backdrop-blur-xl">
+                  <div className="flex items-center gap-3 border-b border-white/10 pb-4 mb-4">
+                    <BookOpen className="w-5 h-5 text-indigo-400" />
+                    <div>
+                      <h3 className="font-display font-bold text-md text-white">Comprehensive Material Breakdown</h3>
+                      <p className="text-xs text-slate-400">Chapter-by-chapter insights, core arguments, and major learning resources</p>
+                    </div>
+                  </div>
+
+                  <div className="space-y-4 text-slate-300 leading-relaxed text-sm">
+                    {(() => {
+                      const text = activeSession.videoSummary;
+                      if (!text) {
+                        return (
+                          <div className="text-center py-12">
+                            <BookMarked className="w-8 h-8 text-slate-600 mx-auto mb-2" />
+                            <p className="text-sm text-slate-400">No source breakdown or summary generated for this session.</p>
+                          </div>
+                        );
+                      }
+                      const blocks = text.split("\n");
+                      return (
+                        <div className="space-y-4">
+                          {blocks.map((line, i) => {
+                            const cleanLine = line.trim();
+                            if (!cleanLine) return null;
+                            if (cleanLine.startsWith("###")) {
+                              return <h4 key={i} className="text-md font-bold text-indigo-300 font-display mt-6 mb-2">{cleanLine.replace("###", "").trim()}</h4>;
+                            }
+                            if (cleanLine.startsWith("##")) {
+                              return <h3 key={i} className="text-lg font-bold text-indigo-400 font-display mt-8 mb-3 border-b border-white/5 pb-2">{cleanLine.replace("##", "").trim()}</h3>;
+                            }
+                            if (cleanLine.startsWith("#")) {
+                              return <h2 key={i} className="text-xl font-extrabold text-white font-display mt-10 mb-4 bg-clip-text text-transparent bg-gradient-to-r from-white to-indigo-300">{cleanLine.replace("#", "").trim()}</h2>;
+                            }
+                            if (cleanLine.startsWith("-") || cleanLine.startsWith("*")) {
+                              return (
+                                <ul key={i} className="list-disc pl-5 space-y-1 my-1">
+                                  <li className="text-sm text-slate-300">{cleanLine.substring(1).trim()}</li>
+                                </ul>
+                              );
+                            }
+                            return <p key={i} className="text-sm leading-relaxed text-slate-300 my-2">{cleanLine}</p>;
+                          })}
+                        </div>
+                      );
+                    })()}
+                  </div>
+                </div>
+              )}
+
+              {/* TAB 3: Embedded/Reconstructed Video Quizzes */}
+              {reviewTab === "native" && (
+                <div className="space-y-6">
+                  <div className="p-4 bg-indigo-500/5 border border-indigo-500/20 rounded-xl flex items-start gap-3">
+                    <HelpCircle className="w-5 h-5 text-indigo-400 shrink-0 mt-0.5" />
+                    <div>
+                      <h4 className="text-xs font-semibold font-mono text-indigo-300 uppercase tracking-wider">Embedded Source Assessments & Answers</h4>
+                      <p className="text-[11px] text-slate-400 mt-1 leading-relaxed">
+                        These are explicit check-your-understanding prompts, assessments, or exercises that were discussed or embedded natively inside the video. For non-video documents or videos without explicit embedded questions, OmniMind has reconstructed 2-3 realistic native practice questions focusing directly on the core material.
+                      </p>
+                    </div>
+                  </div>
+
+                  {activeSession.videoNativeQuizzes && activeSession.videoNativeQuizzes.length > 0 ? (
+                    <div className="space-y-4">
+                      {activeSession.videoNativeQuizzes.map((quiz, idx) => (
+                        <div key={idx} className="bg-white/5 border border-white/10 rounded-xl p-5 space-y-4">
+                          <div className="flex items-start gap-3">
+                            <span className="w-6 h-6 rounded-lg bg-indigo-500/10 border border-indigo-500/30 text-indigo-300 shrink-0 flex items-center justify-center font-mono text-xs font-bold">
+                              {idx + 1}
+                            </span>
+                            <div className="space-y-1">
+                              <h5 className="text-sm font-bold text-white">Assessment Item</h5>
+                              <p className="text-sm text-slate-300 font-sans leading-relaxed">{quiz.question}</p>
                             </div>
                           </div>
-
-                          {/* Quick diagram display */}
-                          <div className="space-y-2">
-                            <p className="text-xs font-semibold text-slate-400 uppercase font-mono">Custom Visual Remediation:</p>
-                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                              <div className="bg-slate-900 border border-white/10 rounded-xl p-3 flex flex-col">
-                                <span className="text-[9px] font-mono text-indigo-400 uppercase tracking-wider mb-2 font-bold">Technical Concept Map</span>
-                                <div 
-                                  className="w-full aspect-[600/350] bg-black/60 rounded-lg p-1 overflow-hidden"
-                                  dangerouslySetInnerHTML={{ __html: question.remediationSvg }}
-                                />
-                              </div>
-                              <div className="bg-slate-900 border border-white/10 rounded-xl p-3 flex flex-col">
-                                <span className="text-[9px] font-mono text-amber-500 uppercase tracking-wider mb-2 font-bold">Illustrated Metaphor SVG</span>
-                                <div 
-                                  className="w-full aspect-[600/350] bg-black/60 rounded-lg p-1 overflow-hidden"
-                                  dangerouslySetInnerHTML={{ __html: question.eli5Svg }}
-                                />
-                              </div>
+                          <div className="pl-9 space-y-3">
+                            <div className="p-3 bg-emerald-500/10 border border-emerald-500/20 rounded-lg">
+                              <span className="text-[10px] font-mono text-emerald-400 uppercase font-bold block mb-1">Answer / Correct Action:</span>
+                              <p className="text-xs text-emerald-200 leading-relaxed font-sans">{quiz.answer}</p>
+                            </div>
+                            <div className="p-3 bg-slate-900 border border-white/5 rounded-lg">
+                              <span className="text-[10px] font-mono text-slate-400 uppercase font-bold block mb-1">Contextual Explanation:</span>
+                              <p className="text-xs text-slate-300 leading-relaxed font-sans italic">"{quiz.explanation}"</p>
                             </div>
                           </div>
                         </div>
-                      </details>
-                    );
-                  })}
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="text-center py-12 border border-dashed border-white/10 rounded-xl bg-white/5">
+                      <HelpCircle className="w-8 h-8 text-slate-600 mx-auto mb-2" />
+                      <p className="text-sm text-slate-400">No native embedded quizzes were found or reconstructed for this source material.</p>
+                    </div>
+                  )}
                 </div>
-              </div>
+              )}
 
             </motion.div>
           )}
