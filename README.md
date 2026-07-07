@@ -102,3 +102,8 @@ This application is built as a highly responsive **Full-Stack SPA** leveraging a
 - `npm run build`: Bundles the production build of the React frontend into `dist/` and compiles the TypeScript server code using `esbuild`.
 - `npm run start`: Runs the pre-compiled, self-contained production server from `dist/server.cjs`.
 - `npm run lint`: Performs static analysis on the codebase via TypeScript compiler checks.
+
+---
+
+*This amazing platform was built by me -sushanshetty💜*
+
