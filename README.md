@@ -105,5 +105,5 @@ This application is built as a highly responsive **Full-Stack SPA** leveraging a
 
 ---
 
-*This amazing platform was built by me -sushanshetty💜*
+*This amazing platform was built by -sushanshetty💜😇*
 
