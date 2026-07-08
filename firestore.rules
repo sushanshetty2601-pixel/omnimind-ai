@@ -1,8 +1,35 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
+    // 1. Global Safety Net - catch-all deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Helper functions
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    // 2. Users Collection
+    match /users/{userId} {
+      allow read: if isSignedIn();
+      allow create, update: if isOwner(userId) && request.resource.data.keys().hasAll(['uid', 'username', 'isPremium']) && request.resource.data.keys().size() == 3;
+      allow delete: if false;
+    }
+
+    // 3. Omnimind Sessions Collection
     match /omnimind_sessions/{sessionId} {
-      allow read, write: if true;
+      allow create: if isSignedIn() && isValidId(sessionId) && request.resource.data.userId == request.auth.uid;
+      allow read, update, delete: if isSignedIn() && isValidId(sessionId) && resource.data.userId == request.auth.uid;
     }
   }
 }

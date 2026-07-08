@@ -1,0 +1,45 @@
+{
+  "entities": {
+    "User": {
+      "title": "User Profile",
+      "description": "User account details and premium status",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "description": "The unique Firebase Auth user ID" },
+        "username": { "type": "string", "description": "The display username of the user" },
+        "isPremium": { "type": "boolean", "description": "Premium account status" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Profile creation timestamp" }
+      },
+      "required": ["uid", "username", "isPremium"]
+    },
+    "QuizSession": {
+      "title": "Quiz Session",
+      "description": "A study session containing metadata, summaries, and generated quiz questions",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "userId": { "type": "string", "description": "The owner's Firebase Auth UID" },
+        "title": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "completed": { "type": "boolean" },
+        "questions": { "type": "array" },
+        "userAnswers": { "type": "object" },
+        "quizSummary": { "type": "string" },
+        "videoSummary": { "type": "string" },
+        "videoNativeQuizzes": { "type": "array" },
+        "syllabus": { "type": "array" }
+      },
+      "required": ["id", "userId", "title", "createdAt", "completed", "questions", "userAnswers"]
+    }
+  },
+  "firestore": {
+    "/users/{uid}": {
+      "schema": "User",
+      "description": "Stored user profiles"
+    },
+    "/omnimind_sessions/{sessionId}": {
+      "schema": "QuizSession",
+      "description": "Stored user quiz and study sessions"
+    }
+  }
+}

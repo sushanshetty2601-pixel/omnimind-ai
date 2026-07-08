@@ -1,15 +1,22 @@
 import { initializeApp } from "firebase/app";
 import { 
-  getFirestore, 
+  initializeFirestore, 
   collection, 
   doc, 
   setDoc, 
+  getDoc,
   getDocs, 
   deleteDoc, 
   query, 
-  orderBy,
-  limit
+  where
 } from "firebase/firestore";
+import { 
+  getAuth, 
+  signInWithEmailAndPassword, 
+  createUserWithEmailAndPassword, 
+  signOut, 
+  onAuthStateChanged 
+} from "firebase/auth";
 
 // Config from firebase-applet-config.json
 const firebaseConfig = {
@@ -23,18 +30,74 @@ const firebaseConfig = {
 };
 
 const app = initializeApp(firebaseConfig);
-export const db = getFirestore(app);
+export const db = initializeFirestore(app, {
+  experimentalForceLongPolling: true,
+});
+export const auth = getAuth(app);
 
 const SESSIONS_COLLECTION = "omnimind_sessions";
+const USERS_COLLECTION = "users";
 
-export async function fetchCloudSessions(): Promise<any[]> {
+export async function fetchUserProfile(uid: string): Promise<any | null> {
   try {
-    const q = query(collection(db, SESSIONS_COLLECTION), orderBy("createdAt", "desc"), limit(50));
+    const docRef = doc(db, USERS_COLLECTION, uid);
+    const snap = await getDoc(docRef);
+    if (snap.exists()) {
+      return snap.data();
+    }
+    return null;
+  } catch (error) {
+    console.error("Error fetching user profile:", error);
+    return null;
+  }
+}
+
+export async function saveUserProfile(uid: string, username: string, isPremium: boolean): Promise<void> {
+  try {
+    const docRef = doc(db, USERS_COLLECTION, uid);
+    await setDoc(docRef, {
+      uid,
+      username,
+      isPremium,
+      updatedAt: new Date().toISOString()
+    }, { merge: true });
+  } catch (error) {
+    console.error("Error saving user profile:", error);
+  }
+}
+
+export async function saveUserProfileData(uid: string, data: any): Promise<void> {
+  try {
+    const docRef = doc(db, USERS_COLLECTION, uid);
+    await setDoc(docRef, {
+      ...data,
+      updatedAt: new Date().toISOString()
+    }, { merge: true });
+  } catch (error) {
+    console.error("Error saving user profile data:", error);
+  }
+}
+
+export async function fetchCloudSessions(userId: string): Promise<any[]> {
+  try {
+    // Query filtered strictly by userId to respect rules_version '2'
+    const q = query(
+      collection(db, SESSIONS_COLLECTION), 
+      where("userId", "==", userId)
+    );
     const querySnapshot = await getDocs(q);
     const results: any[] = [];
     querySnapshot.forEach((doc) => {
       results.push({ ...doc.data(), id: doc.id });
     });
+    
+    // Sort in memory to avoid missing Firestore indexes
+    results.sort((a, b) => {
+      const timeA = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+      const timeB = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+      return timeB - timeA;
+    });
+
     return results;
   } catch (error) {
     console.error("Error fetching sessions from Firestore:", error);
@@ -42,11 +105,12 @@ export async function fetchCloudSessions(): Promise<any[]> {
   }
 }
 
-export async function saveCloudSession(session: any): Promise<void> {
+export async function saveCloudSession(session: any, userId: string): Promise<void> {
   try {
     const docRef = doc(db, SESSIONS_COLLECTION, session.id);
     await setDoc(docRef, {
       ...session,
+      userId,
       updatedAt: new Date().toISOString()
     }, { merge: true });
   } catch (error) {
@@ -61,3 +125,4 @@ export async function deleteCloudSession(sessionId: string): Promise<void> {
     console.error("Error deleting session from Firestore:", error);
   }
 }
+
